@@ -9,12 +9,6 @@ import {
 
 import { ServerConfig, parseArgs, validateConfig } from './index.js';
 import { CalilApiService } from './services/calilApi.js';
-import { 
-  PrefectureLibrariesResponse, 
-  CityLibrariesResponse,
-  ErrorResponse,
-  BookSearchResponse
-} from './types/calil.js';
 
 // ----- MCP Server Implementation -----
 
@@ -49,7 +43,6 @@ export function createServer(): Server {
 export function setupListResourcesHandler(server: Server): void {
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
     logger("ListResources request received");
-    // In an actual implementation, return a list of resources here
     return { "success": true };
   });
 }
@@ -61,7 +54,6 @@ export function setupReadResourceHandler(server: Server): void {
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     logger(`ReadResource request received for URI: ${request.params.uri}`);
     
-    // In an actual implementation, return the resource content here
     return {
       contents: [
         {
@@ -90,8 +82,20 @@ export function setupListToolsHandler(server: Server): void {
             type: "object",
             properties: {
               query: { type: "string" },
-              // Add other search parameters here
+              isbn: { 
+                type: "string",
+                description: "ISBN of the book to search for"
+              },
+              prefecture: { 
+                type: "string",
+                description: "Prefecture name in Japanese (e.g., '東京都', '千葉県')"
+              },
+              city: { 
+                type: "string",
+                description: "City name in Japanese (e.g., '八千代市', '横浜市')"
+              }
             },
+            required: ["query", "prefecture", "city"]
           },
         },
         {
@@ -142,19 +146,61 @@ export function setupCallToolHandler(server: Server): void {
     if (request.params.name === "search_books") {
       logger(`Received search_books request with params: ${JSON.stringify(request.params.arguments)}`);
       
-      // プレースホルダーの検索結果
-      const response: BookSearchResponse = {
-        result: "This is a placeholder search result"
-      };
+      const { query, prefecture, city, isbn } = request.params.arguments as { query: string; prefecture: string; city: string; isbn?: string };
       
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(response)
-          }
-        ]
-      };
+      // 入力パラメータのバリデーション
+      if (!prefecture || typeof prefecture !== 'string' || !city || typeof city !== 'string') {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ error: "Prefecture and city parameters are required" })
+            }
+          ]
+        };
+      }
+      
+      try {
+        // ISBNの取得（指定がなければクエリから抽出）
+        const targetIsbn = isbn ? isbn : extractIsbnFromQuery(query);
+        
+        if (!targetIsbn || (Array.isArray(targetIsbn) && targetIsbn.length === 0)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ error: "Could not determine ISBN from query" })
+              }
+            ]
+          };
+        }
+        
+        // シンプル化された蔵書検索の実行
+        const finalIsbn = Array.isArray(targetIsbn) ? targetIsbn[0] : targetIsbn;
+        logger(`Searching for book with ISBN: ${finalIsbn} in ${prefecture}, ${city}`);
+        
+        const result = await calilApiService.searchBookInCity(finalIsbn, prefecture, city);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result)
+            }
+          ]
+        };
+      } catch (error) {
+        logger(`Error searching for books: ${error instanceof Error ? error.message : String(error)}`);
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ error: `Failed to search for books: ${error instanceof Error ? error.message : String(error)}` })
+            }
+          ]
+        };
+      }
     } 
     else if (request.params.name === "get_libraries_by_prefecture") {
       logger(`Received get_libraries_by_prefecture request for prefecture: ${request.params.arguments?.prefecture}`);
@@ -164,15 +210,11 @@ export function setupCallToolHandler(server: Server): void {
       if (!prefecture || typeof prefecture !== 'string') {
         logger(`Invalid prefecture parameter: ${JSON.stringify(request.params.arguments)}`);
         
-        const errorResponse: ErrorResponse = {
-          error: "Prefecture parameter is required and must be a string"
-        };
-        
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(errorResponse)
+              text: JSON.stringify({ error: "Prefecture parameter is required" })
             }
           ]
         };
@@ -180,28 +222,13 @@ export function setupCallToolHandler(server: Server): void {
       
       try {
         logger(`Fetching libraries for prefecture: ${prefecture}`);
-        const librariesData = await calilApiService.getLibrariesByPrefecture(prefecture);
-        logger(`API response received - raw data type: ${typeof librariesData}, isArray: ${Array.isArray(librariesData)}`);
+        const libraries = await calilApiService.getLibraries(prefecture);
         
-        if (Array.isArray(librariesData)) {
-          logger(`Library data is an array with ${librariesData.length} items`);
-        } else if (typeof librariesData === 'object') {
-          logger(`Library data is an object with ${Object.keys(librariesData).length} keys: ${Object.keys(librariesData).join(', ')}`);
-        }
-        
-        // Process the library data into a consistent format
-        const processedLibraries = calilApiService.processLibraryData(librariesData);
-        
-        logger(`Processed ${processedLibraries.length} libraries after data transformation`);
-        
-        // Create a properly structured response
-        const response: PrefectureLibrariesResponse = {
+        const response = {
           prefecture: prefecture,
-          libraryCount: processedLibraries.length,
-          libraries: processedLibraries.slice(0, 10) // Limit to first 10 libraries to avoid response size issues
+          libraryCount: libraries.length,
+          libraries: libraries.slice(0, 10) // 最初の10件に制限
         };
-        
-        logger(`Returning response with ${response.libraries.length} libraries (limited from ${response.libraryCount} total)`);
         
         return {
           content: [
@@ -212,18 +239,13 @@ export function setupCallToolHandler(server: Server): void {
           ]
         };
       } catch (error) {
-        logger(`Error fetching libraries: ${error}`);
-        logger(`Error details: ${error instanceof Error ? error.stack : 'Unknown error format'}`);
-        
-        const errorResponse: ErrorResponse = {
-          error: `Failed to fetch libraries: ${error instanceof Error ? error.message : String(error)}`
-        };
+        logger(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
         
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(errorResponse)
+              text: JSON.stringify({ error: `Failed to fetch libraries: ${error instanceof Error ? error.message : String(error)}` })
             }
           ]
         };
@@ -238,15 +260,11 @@ export function setupCallToolHandler(server: Server): void {
       if (!prefecture || typeof prefecture !== 'string' || !city || typeof city !== 'string') {
         logger(`Invalid prefecture or city parameter: ${JSON.stringify(request.params.arguments)}`);
         
-        const errorResponse: ErrorResponse = {
-          error: "Prefecture and city parameters are required and must be strings"
-        };
-        
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(errorResponse)
+              text: JSON.stringify({ error: "Prefecture and city parameters are required" })
             }
           ]
         };
@@ -254,18 +272,14 @@ export function setupCallToolHandler(server: Server): void {
       
       try {
         logger(`Fetching libraries for prefecture: ${prefecture} and city: ${city}`);
-        const librariesData = await calilApiService.getLibrariesByCity(prefecture, city);
-        logger(`City library data received with ${librariesData.length} items`);
+        const libraries = await calilApiService.getLibraries(prefecture, city);
         
-        // Create a properly structured response
-        const response: CityLibrariesResponse = {
+        const response = {
           prefecture: prefecture,
           city: city,
-          libraryCount: librariesData.length,
-          libraries: librariesData.slice(0, 10) // Limit to first 10 libraries to avoid response size issues
+          libraryCount: libraries.length,
+          libraries: libraries.slice(0, 10) // 最初の10件に制限
         };
-        
-        logger(`Returning response with ${response.libraries.length} libraries (limited from ${response.libraryCount} total)`);
         
         return {
           content: [
@@ -276,18 +290,13 @@ export function setupCallToolHandler(server: Server): void {
           ]
         };
       } catch (error) {
-        logger(`Error fetching libraries: ${error}`);
-        logger(`Error details: ${error instanceof Error ? error.stack : 'Unknown error format'}`);
-        
-        const errorResponse: ErrorResponse = {
-          error: `Failed to fetch libraries: ${error instanceof Error ? error.message : String(error)}`
-        };
+        logger(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
         
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(errorResponse)
+              text: JSON.stringify({ error: `Failed to fetch libraries: ${error instanceof Error ? error.message : String(error)}` })
             }
           ]
         };
@@ -296,6 +305,25 @@ export function setupCallToolHandler(server: Server): void {
     
     throw new Error(`Unknown tool: ${request.params.name}`);
   });
+}
+
+/**
+ * クエリ文字列からISBNを抽出する
+ * 標準的なISBN-10およびISBN-13の両方に対応
+ * 
+ * @param query 検索クエリ
+ * @returns 抽出されたISBN（見つからない場合は空配列）
+ */
+function extractIsbnFromQuery(query: string): string[] {
+  // ISBN-13: 13桁の数字（ハイフン付きも可）
+  // ISBN-10: 10桁の数字またはX終わり（ハイフン付きも可）
+  const isbnRegex = /(?:ISBN(?:-1[03])?:?\s*)?(?=.{17}|.{13}|.{10})(?:97[89][-\s]?)?[0-9]{1,5}[-\s]?[0-9]+[-\s]?[0-9]+[-\s]?[0-9X]/gi;
+  
+  const matches = query.match(isbnRegex);
+  if (!matches) return [];
+  
+  // ハイフンや空白を削除して標準化
+  return matches.map(match => match.replace(/[-\s]/g, ''));
 }
 
 // ----- Server Startup Process -----

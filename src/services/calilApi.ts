@@ -1,16 +1,28 @@
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
-import { 
-  CalilLibraryRawData, 
-  LibraryInfo,
-  extractLibraryInfo
-} from '../types/calil.js';
 
 // Load environment variables
 dotenv.config();
 
 // Get API key from environment variables
 const CALIL_API_KEY = process.env.CALIL_APPLICATION_KEY;
+
+/**
+ * シンプルな図書館情報の型
+ */
+interface LibraryInfo {
+  libid: string;
+  formal: string;
+  short: string;
+  systemid: string;
+  systemname: string;
+  libkey: string;
+  category: string;
+  pref: string;
+  city: string;
+  address: string;
+  url_pc: string;
+}
 
 /**
  * Logger utility
@@ -20,10 +32,32 @@ function log(message: string): void {
 }
 
 /**
- * Calil API service for interacting with libraries
+ * 蔵書APIレスポンスの型
+ */
+interface BookResponse {
+  session: string;
+  continue: 0 | 1;
+  books: {
+    [isbn: string]: {
+      [systemid: string]: {
+        status: string;
+        libkey: {
+          [key: string]: {
+            status: string;
+          }
+        }
+        reserveurl?: string;
+      }
+    }
+  }
+}
+
+/**
+ * シンプル化されたCalil API サービス
  */
 export class CalilApiService {
   private apiBaseUrl = 'https://api.calil.jp/library';
+  private apiCheckUrl = 'https://api.calil.jp/check';
   private apiKey: string;
 
   constructor() {
@@ -35,71 +69,68 @@ export class CalilApiService {
   }
 
   /**
-   * Fetch libraries in the specified prefecture
-   * @param pref Prefecture name in Japanese (e.g., "東京都", "大阪府")
-   * @returns Array of library information
+   * JSONPレスポンスをJSONに変換
    */
-  async getLibrariesByPrefecture(pref: string): Promise<CalilLibraryRawData[]> {
+  private parseJsonpResponse(text: string): any {
+    if (text.startsWith('callback(') && text.endsWith(');')) {
+      const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
+      return JSON.parse(jsonText);
+    }
+    return JSON.parse(text);
+  }
+
+  /**
+   * 図書館一覧を取得
+   * @param pref 都道府県名（必須）
+   * @param city 市区町村名（任意）
+   */
+  async getLibraries(pref: string, city?: string): Promise<LibraryInfo[]> {
     try {
-      const url = `${this.apiBaseUrl}?appkey=${this.apiKey}&format=json&pref=${encodeURIComponent(pref)}`;
-      log(`Calling Calil API with URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
+      const params = new URLSearchParams({
+        appkey: this.apiKey,
+        format: 'json',
+        pref: pref
+      });
+      
+      if (city) {
+        params.append('city', city);
+      }
+      
+      const url = `${this.apiBaseUrl}?${params.toString()}`;
+      log(`Fetching libraries: pref=${pref}${city ? ', city=' + city : ''}`);
       
       const response = await fetch(url);
-      log(`API response status: ${response.status} ${response.statusText}`);
       
       if (!response.ok) {
         throw new Error(`API call failed with status: ${response.status}`);
       }
       
       const text = await response.text();
-      log(`Raw response length: ${text.length} characters`);
+      const libraries = this.parseJsonpResponse(text);
       
-      // APIはJSONP形式で返されることがある。形式に応じて適切に処理
-      let jsonData;
-      if (text.startsWith('callback(') && text.endsWith(');')) {
-        // JSONP形式の場合、不要な部分を削除
-        const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
-        jsonData = JSON.parse(jsonText);
-      } else {
-        // 通常のJSON形式の場合
-        jsonData = JSON.parse(text);
-      }
-      
-      log(`Parsed data: Array=${Array.isArray(jsonData)}, Length=${Array.isArray(jsonData) ? jsonData.length : 'not array'}`);
-      
-      return jsonData as CalilLibraryRawData[];
+      return Array.isArray(libraries) ? libraries : [];
     } catch (error) {
       log(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
-      if (error instanceof Error && error.stack) {
-        log(`Error stack trace: ${error.stack}`);
-      }
       throw error;
     }
   }
 
   /**
-   * Process raw library data into a standardized format
-   * @param rawData Raw library data from Calil API
-   * @returns Processed library information
+   * 蔵書検索の実行
+   * @param isbn 検索対象ISBN（単一または複数カンマ区切り）
+   * @param systemids 図書館システムID（単一または複数カンマ区切り）
    */
-  processLibraryData(rawData: CalilLibraryRawData[]): LibraryInfo[] {
-    return Array.isArray(rawData) ? rawData.flatMap((system) => extractLibraryInfo([system])) : 
-      Object.values(rawData).flatMap((system) => extractLibraryInfo([system as CalilLibraryRawData]));
-  }
-
-  /**
-   * Fetch libraries in the specified city within a prefecture
-   * @param pref Prefecture name in Japanese (e.g., "千葉県", "東京都")
-   * @param city City name in Japanese (e.g., "八千代市", "横浜市")
-   * @returns Filtered array of library information for the specified city
-   */
-  async getLibrariesByCity(pref: string, city: string): Promise<LibraryInfo[]> {
+  async checkBooks(isbn: string, systemids: string): Promise<BookResponse> {
     try {
-      log(`Fetching libraries for prefecture: ${pref} and city: ${city}`);
+      const params = new URLSearchParams({
+        appkey: this.apiKey,
+        isbn: isbn,
+        systemid: systemids,
+        format: 'json'
+      });
       
-      // 都道府県と市区町村名を指定して直接APIを呼び出す
-      const url = `${this.apiBaseUrl}?appkey=${this.apiKey}&format=json&pref=${encodeURIComponent(pref)}&city=${encodeURIComponent(city)}`;
-      log(`Calling Calil API with URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
+      const url = `${this.apiCheckUrl}?${params.toString()}`;
+      log(`Checking books: isbn=${isbn}, systemids=${systemids}`);
       
       const response = await fetch(url);
       
@@ -108,33 +139,132 @@ export class CalilApiService {
       }
       
       const text = await response.text();
+      const result = this.parseJsonpResponse(text) as BookResponse;
       
-      // Handle JSONP or JSON response
-      let jsonData;
-      if (text.startsWith('callback(') && text.endsWith(');')) {
-        const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
-        jsonData = JSON.parse(jsonText);
-      } else {
-        jsonData = JSON.parse(text);
+      // ポーリングが必要な場合
+      if (result.continue === 1) {
+        return this.pollResults(result.session);
       }
       
-      // Convert raw data to standardized format
-      const libraries = this.processLibraryData(jsonData);
-      
-      // Explicitly filter by city name to ensure accuracy
-      const filteredLibraries = libraries.filter(library => {
-        // Check if the library's address contains the city name
-        return library.address && library.address.includes(city);
-      });
-      
-      log(`Found ${filteredLibraries.length} libraries in ${city} (filtered from ${libraries.length} total)`);
-      return filteredLibraries;
+      return result;
     } catch (error) {
-      log(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
-      if (error instanceof Error && error.stack) {
-        log(`Error stack trace: ${error.stack}`);
-      }
+      log(`Error checking books: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
+    }
+  }
+
+  /**
+   * 結果ポーリング
+   * @param session セッションID
+   */
+  private async pollResults(session: string, maxRetries: number = 5): Promise<BookResponse> {
+    try {
+      for (let i = 0; i < maxRetries; i++) {
+        // ポーリング間隔を設定（1秒）
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        const params = new URLSearchParams({
+          appkey: this.apiKey,
+          session: session,
+          format: 'json'
+        });
+        
+        const url = `${this.apiCheckUrl}?${params.toString()}`;
+        log(`Polling results: session=${session}, attempt=${i+1}/${maxRetries}`);
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+          throw new Error(`API call failed with status: ${response.status}`);
+        }
+        
+        const text = await response.text();
+        const result = this.parseJsonpResponse(text) as BookResponse;
+        
+        // ポーリング完了
+        if (result.continue === 0) {
+          return result;
+        }
+      }
+      
+      throw new Error(`Polling timed out after ${maxRetries} attempts`);
+    } catch (error) {
+      log(`Error polling results: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * 市区町村内の図書館で本を検索
+   * @param isbn ISBN
+   * @param pref 都道府県名
+   * @param city 市区町村名
+   */
+  async searchBookInCity(isbn: string, pref: string, city: string): Promise<any> {
+    try {
+      // 1. まず市区町村の図書館一覧を取得
+      const libraries = await this.getLibraries(pref, city);
+      
+      if (libraries.length === 0) {
+        return { error: `No libraries found in ${pref}, ${city}` };
+      }
+      
+      // 2. システムIDの一覧を作成
+      const systemIds = [...new Set(libraries.map(lib => lib.systemid))].join(',');
+      
+      // 3. 蔏書検索API呼び出し
+      const result = await this.checkBooks(isbn, systemIds);
+      
+      // 4. 結果を整形して返す
+      return this.formatBookResult(result, libraries, isbn);
+    } catch (error) {
+      log(`Error searching book in city: ${error instanceof Error ? error.message : String(error)}`);
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * 検索結果を整形して返す
+   */
+  private formatBookResult(bookResponse: BookResponse, libraries: LibraryInfo[], isbn: string): any {
+    try {
+      const result = {
+        isbn: isbn,
+        libraries: [] as any[]
+      };
+      
+      // 各システムの結果を処理
+      const bookData = bookResponse.books[isbn];
+      if (!bookData) return result;
+      
+      for (const systemId in bookData) {
+        const systemData = bookData[systemId];
+        const systemLibraries = libraries.filter(lib => lib.systemid === systemId);
+        
+        // libkeyが存在する場合のみ処理
+        if (systemData.libkey) {
+          for (const libKey in systemData.libkey) {
+            const libraryInfo = systemLibraries.find(lib => lib.libkey === libKey);
+            
+            if (libraryInfo) {
+              result.libraries.push({
+                name: libraryInfo.formal,
+                status: systemData.libkey[libKey].status,
+                reserveUrl: systemData.reserveurl 
+                  ? systemData.reserveurl.replace('{{isbn}}', isbn)
+                      .replace('{{systemid}}', systemId)
+                      .replace('{{libkey}}', libKey) 
+                  : null
+              });
+            }
+          }
+        }
+      }
+      
+      return result;
+    } catch (error) {
+      log(`Error formatting book result: ${error instanceof Error ? error.message : String(error)}`);
+      return { error: error instanceof Error ? error.message : String(error) };
     }
   }
 }

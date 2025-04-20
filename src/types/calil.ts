@@ -72,11 +72,81 @@ export interface ErrorResponse {
 }
 
 /**
- * 書籍検索レスポンスの型（プレースホルダー）
+ * 書籍検索リクエストの型
+ */
+export interface BookSearchRequest {
+  isbn?: string;
+  isbn_list?: string[];
+  prefecture: string;
+  city?: string;
+}
+
+/**
+ * 書籍検索レスポンスの型
  */
 export interface BookSearchResponse {
-  result: string;
-  // 将来的に実装される予定の書籍検索結果の型
+  query: string;
+  results: BookAvailabilityResult[];
+}
+
+/**
+ * 蔵書検索のステータス
+ */
+export type BookAvailabilityStatus = 'OK' | 'Cache' | 'Running' | 'Error';
+
+/**
+ * 蔵書の貸出状態
+ */
+export type BookLendingStatus = '貸出可' | '蔵書あり' | '館内のみ' | '貸出中' | '予約中' | '準備中' | '休館中' | '蔵書なし' | '指定館ではない' | '-';
+
+/**
+ * 単一図書館の蔵書状態
+ */
+export interface LibraryBookStatus {
+  status: BookLendingStatus;
+  reserveUrl?: string;
+  libkey: string;
+}
+
+/**
+ * 図書館システム単位での蔵書状態
+ */
+export interface SystemBookStatus {
+  status: BookAvailabilityStatus;
+  books: {
+    [isbn: string]: {
+      [libkey: string]: LibraryBookStatus;
+    };
+  };
+  reserve?: string;
+}
+
+/**
+ * 蔵書検索のレスポンス
+ */
+export interface BookSearchRawResponse {
+  session: string;
+  continue: 0 | 1;
+  status: BookAvailabilityStatus;
+  books: {
+    [isbn: string]: {
+      [systemid: string]: SystemBookStatus;
+    };
+  };
+}
+
+/**
+ * 整形された蔵書検索結果
+ */
+export interface BookAvailabilityResult {
+  isbn: string;
+  title?: string;
+  availability: {
+    library: LibraryInfo;
+    status: BookLendingStatus;
+    reserveUrl?: string;
+  }[];
+  raw: BookSearchRawResponse;
 }
 
 /**
