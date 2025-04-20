@@ -32,7 +32,7 @@ function log(message: string): void {
 }
 
 /**
- * 蔵書APIレスポンスの型
+ * 蔵書APIレスポンスの型 (実際のAPIレスポンス形式に合わせた修正版)
  */
 interface BookResponse {
   session: string;
@@ -42,10 +42,8 @@ interface BookResponse {
       [systemid: string]: {
         status: string;
         libkey: {
-          [key: string]: {
-            status: string;
-          }
-        }
+          [libkey: string]: string;  // ここが重要: 図書館キーに対する値は直接文字列
+        };
         reserveurl?: string;
       }
     }
@@ -224,40 +222,76 @@ export class CalilApiService {
   }
 
   /**
-   * 検索結果を整形して返す
+   * 検索結果を整形して返す (修正版)
    */
   private formatBookResult(bookResponse: BookResponse, libraries: LibraryInfo[], isbn: string): any {
     try {
+      // デバッグ情報を出力
+      log(`API response for ISBN ${isbn}: ${JSON.stringify(bookResponse)}`);
+      
       const result = {
         isbn: isbn,
         libraries: [] as any[]
       };
       
+      // books配下にISBNがない場合
+      if (!bookResponse.books || !bookResponse.books[isbn]) {
+        log(`No data found for ISBN ${isbn}`);
+        return result;
+      }
+      
       // 各システムの結果を処理
       const bookData = bookResponse.books[isbn];
-      if (!bookData) return result;
       
       for (const systemId in bookData) {
         const systemData = bookData[systemId];
+        log(`System data for ${systemId}: ${JSON.stringify(systemData)}`);
+        
+        // システムステータスがOKまたはCacheの場合のみ処理
+        if (systemData.status !== 'OK' && systemData.status !== 'Cache') {
+          log(`Skipping system ${systemId} due to status: ${systemData.status}`);
+          continue;
+        }
+        
+        // 対象のシステムに属する図書館を取得
         const systemLibraries = libraries.filter(lib => lib.systemid === systemId);
         
-        // libkeyが存在する場合のみ処理
-        if (systemData.libkey) {
-          for (const libKey in systemData.libkey) {
-            const libraryInfo = systemLibraries.find(lib => lib.libkey === libKey);
-            
-            if (libraryInfo) {
-              result.libraries.push({
-                name: libraryInfo.formal,
-                status: systemData.libkey[libKey].status,
-                reserveUrl: systemData.reserveurl 
-                  ? systemData.reserveurl.replace('{{isbn}}', isbn)
-                      .replace('{{systemid}}', systemId)
-                      .replace('{{libkey}}', libKey) 
-                  : null
-              });
-            }
+        // libkeyが存在しない場合はスキップ
+        if (!systemData.libkey) {
+          log(`No libkey data for system ${systemId}`);
+          continue;
+        }
+        
+        // 各図書館の蔵書状態を処理
+        for (const libKey in systemData.libkey) {
+          const libraryInfo = systemLibraries.find(lib => lib.libkey === libKey);
+          
+          if (!libraryInfo) {
+            log(`Library with key ${libKey} not found in system ${systemId}`);
+            continue;
           }
+          
+          // 貸出ステータスの取得 (修正部分)
+          // APIの仕様では `libkey` の値は直接文字列
+          const lendingStatus = systemData.libkey[libKey] || '不明';
+          
+          log(`Library: ${libraryInfo.formal}, status: ${lendingStatus}`);
+          
+          // 予約URLの構築
+          let reserveUrl = null;
+          if (systemData.reserveurl && lendingStatus !== '蔵書なし') {
+            reserveUrl = systemData.reserveurl
+              .replace('{{isbn}}', isbn)
+              .replace('{{systemid}}', systemId)
+              .replace('{{libkey}}', libKey);
+          }
+          
+          // 結果に追加
+          result.libraries.push({
+            name: libraryInfo.formal,
+            status: lendingStatus,
+            reserveUrl: reserveUrl
+          });
         }
       }
       
