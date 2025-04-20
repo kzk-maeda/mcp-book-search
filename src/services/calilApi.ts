@@ -222,7 +222,7 @@ export class CalilApiService {
   }
 
   /**
-   * 検索結果を整形して返す (修正版)
+   * 検索結果を整形して返す
    */
   private formatBookResult(bookResponse: BookResponse, libraries: LibraryInfo[], isbn: string): any {
     try {
@@ -271,7 +271,7 @@ export class CalilApiService {
             continue;
           }
           
-          // 貸出ステータスの取得 (修正部分)
+          // 貸出ステータスの取得
           // APIの仕様では `libkey` の値は直接文字列
           const lendingStatus = systemData.libkey[libKey] || '不明';
           
