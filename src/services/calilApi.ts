@@ -1,5 +1,10 @@
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
+import { 
+  CalilLibraryRawData, 
+  LibraryInfo,
+  extractLibraryInfo
+} from '../types/calil.js';
 
 // Load environment variables
 dotenv.config();
@@ -12,28 +17,6 @@ const CALIL_API_KEY = process.env.CALIL_APPLICATION_KEY;
  */
 function log(message: string): void {
   console.error(`[calil-api] ${message}`);
-}
-
-/**
- * Interface for library data returned by Calil API
- */
-interface CalilLibrary {
-  systemid: string;
-  systemname: string;
-  libkey: Record<string, {
-    libid: string;
-    short: string;
-    formal: string;
-    url_pc: string;
-    address: string;
-    pref: string;
-    city: string;
-    post: string;
-    tel: string;
-    geocode: string;
-    category: string;
-    image: string;
-  }>;
 }
 
 /**
@@ -56,7 +39,7 @@ export class CalilApiService {
    * @param pref Prefecture name in Japanese (e.g., "東京都", "大阪府")
    * @returns Array of library information
    */
-  async getLibrariesByPrefecture(pref: string): Promise<any> {
+  async getLibrariesByPrefecture(pref: string): Promise<CalilLibraryRawData[]> {
     try {
       const url = `${this.apiBaseUrl}?appkey=${this.apiKey}&format=json&pref=${encodeURIComponent(pref)}`;
       log(`Calling Calil API with URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
@@ -68,25 +51,84 @@ export class CalilApiService {
         throw new Error(`API call failed with status: ${response.status}`);
       }
       
-      // Calil API returns JSONP by default, even with format=json
-      // Need to extract the actual JSON from the response
       const text = await response.text();
       log(`Raw response length: ${text.length} characters`);
-      log(`First 100 chars: ${text.substring(0, 100)}...`);
       
-      const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
-      log(`JSON text length after JSONP extraction: ${jsonText.length} characters`);
-      
-      const parsed = JSON.parse(jsonText);
-      log(`Parsed result type: ${typeof parsed}, isArray: ${Array.isArray(parsed)}`);
-      
-      if (Array.isArray(parsed)) {
-        log(`Parsed ${parsed.length} library records`);
-      } else if (parsed && typeof parsed === 'object') {
-        log(`Parsed object with ${Object.keys(parsed).length} keys`);
+      // APIはJSONP形式で返されることがある。形式に応じて適切に処理
+      let jsonData;
+      if (text.startsWith('callback(') && text.endsWith(');')) {
+        // JSONP形式の場合、不要な部分を削除
+        const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
+        jsonData = JSON.parse(jsonText);
+      } else {
+        // 通常のJSON形式の場合
+        jsonData = JSON.parse(text);
       }
       
-      return parsed;
+      log(`Parsed data: Array=${Array.isArray(jsonData)}, Length=${Array.isArray(jsonData) ? jsonData.length : 'not array'}`);
+      
+      return jsonData as CalilLibraryRawData[];
+    } catch (error) {
+      log(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof Error && error.stack) {
+        log(`Error stack trace: ${error.stack}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Process raw library data into a standardized format
+   * @param rawData Raw library data from Calil API
+   * @returns Processed library information
+   */
+  processLibraryData(rawData: CalilLibraryRawData[]): LibraryInfo[] {
+    return Array.isArray(rawData) ? rawData.flatMap((system) => extractLibraryInfo([system])) : 
+      Object.values(rawData).flatMap((system) => extractLibraryInfo([system as CalilLibraryRawData]));
+  }
+
+  /**
+   * Fetch libraries in the specified city within a prefecture
+   * @param pref Prefecture name in Japanese (e.g., "千葉県", "東京都")
+   * @param city City name in Japanese (e.g., "八千代市", "横浜市")
+   * @returns Filtered array of library information for the specified city
+   */
+  async getLibrariesByCity(pref: string, city: string): Promise<LibraryInfo[]> {
+    try {
+      log(`Fetching libraries for prefecture: ${pref} and city: ${city}`);
+      
+      // 都道府県と市区町村名を指定して直接APIを呼び出す
+      const url = `${this.apiBaseUrl}?appkey=${this.apiKey}&format=json&pref=${encodeURIComponent(pref)}&city=${encodeURIComponent(city)}`;
+      log(`Calling Calil API with URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
+      
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error(`API call failed with status: ${response.status}`);
+      }
+      
+      const text = await response.text();
+      
+      // Handle JSONP or JSON response
+      let jsonData;
+      if (text.startsWith('callback(') && text.endsWith(');')) {
+        const jsonText = text.replace(/^callback\(/, '').replace(/\);$/, '');
+        jsonData = JSON.parse(jsonText);
+      } else {
+        jsonData = JSON.parse(text);
+      }
+      
+      // Convert raw data to standardized format
+      const libraries = this.processLibraryData(jsonData);
+      
+      // Explicitly filter by city name to ensure accuracy
+      const filteredLibraries = libraries.filter(library => {
+        // Check if the library's address contains the city name
+        return library.address && library.address.includes(city);
+      });
+      
+      log(`Found ${filteredLibraries.length} libraries in ${city} (filtered from ${libraries.length} total)`);
+      return filteredLibraries;
     } catch (error) {
       log(`Error fetching libraries: ${error instanceof Error ? error.message : String(error)}`);
       if (error instanceof Error && error.stack) {
